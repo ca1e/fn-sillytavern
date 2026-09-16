@@ -29,7 +29,7 @@ SillyTavern（酒馆）的飞牛 fnOS 原生应用封装。内置 SillyTavern **
 
 ```bash
 # 在 fnOS 上通过 appcenter-cli 安装本地 fpk
-appcenter-cli install-fpk fn-sillytavern-v1.19.0.fpk
+appcenter-cli install-fpk fn-sillytavern.fpk
 
 # 或开启手动安装入口后，在应用中心上传 fpk
 appcenter-cli manual-install enable
