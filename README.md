@@ -29,7 +29,7 @@ SillyTavern（酒馆）的飞牛 fnOS 原生应用封装。内置 SillyTavern **
 
 ```bash
 # 在 fnOS 上通过 appcenter-cli 安装本地 fpk
-appcenter-cli install-fpk fn-sillytavern-v1.0.0.fpk
+appcenter-cli install-fpk fn-sillytavern-v1.19.0.fpk
 
 # 或开启手动安装入口后，在应用中心上传 fpk
 appcenter-cli manual-install enable
@@ -75,6 +75,7 @@ appcenter-cli manual-install enable
 - 源码默认经 `https://gh-proxy.com` 加速下载，可用 `GH_PROXY=...` 覆盖
 - fnpack CLI（fnOS 打包工具）在 Linux 上自动从飞牛官方地址下载，可用 `FNPACK_URL=...` 覆盖
 - 发布：推送 `v*` tag 触发 CI 构建并附到 GitHub Release
+- **版本约定**：应用版本与所捆绑的 SillyTavern 版本保持一致（如 `1.19.0`），升级 SillyTavern 时同步修改 `manifest` 的 `version` 与 `build.sh` 的 `ST_VERSION`
 
 ### 排障
 

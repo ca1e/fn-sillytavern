@@ -1,5 +1,5 @@
 appname               = fn-sillytavern
-version               = 1.0.0
+version               = 1.19.0
 display_name          = SillyTavern
 desc                  = SillyTavern（酒馆）是一个面向高级用户的本地 LLM 前端，支持接入 OpenAI、Claude、Gemini、OpenRouter 及本地模型等进行 AI 角色扮演与对话创作。本应用内置 SillyTavern 1.19.0，安装时通过 npm 安装依赖（可选国内镜像），通过 fnOS 桌面一键打开，数据持久化于应用的共享目录，升级保留聊天记录与角色卡。访问控制默认仅放行所在网段，可在安装向导中追加白名单。
 platform              = x86
