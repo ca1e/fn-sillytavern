@@ -1,0 +1,11 @@
+# SillyTavern source staged at build time by build.sh
+app/sillytavern/
+
+# Build artifacts
+*.fpk
+*.zip
+.fnpack-cache/
+
+# OS / editor
+.DS_Store
+Thumbs.db

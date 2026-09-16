@@ -1,0 +1,97 @@
+#!/bin/bash
+
+### This script is called after the user changes environment variables in the
+### application settings page. It regenerates the service config and restarts
+### the app when it is running.
+
+LOG_FILE="${TRIM_PKGVAR}/info.log"
+RESTART_MARK_FILE="${TRIM_PKGVAR}/internal-restart"
+
+APP_SHARE="${TRIM_APPDEST_VOL}/@appshare/fn-sillytavern"
+CONFIG_DIR="${APP_SHARE}/config"
+CONFIG_FILE="${CONFIG_DIR}/config.yaml"
+ST_DIR="${TRIM_APPDEST}/sillytavern"
+
+MAIN_SCRIPT="${TRIM_APPDEST}/cmd/main"
+
+log_message() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [config_callback] $1" >>"${LOG_FILE}"
+}
+
+log_info() {
+    log_message "INFO: $1"
+}
+
+log_error() {
+    log_message "ERROR: $1"
+}
+
+[ -f "${CONFIG_FILE}" ] || {
+    log_info "config.yaml not found (app not installed properly?), nothing to reconfigure."
+    exit 0
+}
+
+# ---------------------------------------------------------------------------
+# Rewrite port and whitelist in the persistent config.yaml
+# ---------------------------------------------------------------------------
+PORT="${wizard_port:-8000}"
+
+SUBNET_CIDR=""
+if command -v ip >/dev/null 2>&1; then
+    SUBNET_CIDR="$(ip -4 addr show scope global 2>/dev/null | awk '/inet /{print $2; exit}')"
+fi
+if [ -z "${SUBNET_CIDR}" ] && command -v hostname >/dev/null 2>&1; then
+    FIRST_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    [ -n "${FIRST_IP}" ] && SUBNET_CIDR="${FIRST_IP}/24"
+fi
+
+WHITELIST_ENTRIES="127.0.0.1,::1"
+[ -n "${SUBNET_CIDR}" ] && WHITELIST_ENTRIES="${WHITELIST_ENTRIES},${SUBNET_CIDR}"
+if [ -n "${wizard_extra_whitelist}" ]; then
+    EXTRA="$(printf '%s' "${wizard_extra_whitelist}" | tr -d '[:space:]')"
+    [ -n "${EXTRA}" ] && WHITELIST_ENTRIES="${WHITELIST_ENTRIES},${EXTRA}"
+fi
+
+TMP_CONFIG="${CONFIG_FILE}.tmp"
+awk -v entries="${WHITELIST_ENTRIES}" '
+    /^whitelist:/ {
+        print "whitelist:"
+        n = split(entries, arr, ",")
+        for (i = 1; i <= n; i++) print "  - " arr[i]
+        skip = 1
+        next
+    }
+    skip && /^[[:space:]]/ { next }
+    { skip = 0; print }
+' "${CONFIG_FILE}" \
+| sed -e "s/^port: .*/port: ${PORT}/" \
+      -e "s/^listen: .*/listen: true/" \
+> "${TMP_CONFIG}" || {
+    log_error "failed to rewrite ${CONFIG_FILE}."
+    rm -f "${TMP_CONFIG}"
+    exit 1
+}
+mv "${TMP_CONFIG}" "${CONFIG_FILE}"
+log_info "config.yaml rewritten (port: ${PORT}, whitelist: ${WHITELIST_ENTRIES})."
+
+# ---------------------------------------------------------------------------
+# Restart the service if it is currently running
+# ---------------------------------------------------------------------------
+if bash "${MAIN_SCRIPT}" status; then
+    log_info "App is running, performing internal restart..."
+    date +%s >"${RESTART_MARK_FILE}"
+    FNOS_INTERNAL_RESTART=1 bash "${MAIN_SCRIPT}" stop >>"${LOG_FILE}" 2>&1
+    bash "${MAIN_SCRIPT}" start >>"${LOG_FILE}" 2>&1
+    rm -f "${RESTART_MARK_FILE}"
+    if bash "${MAIN_SCRIPT}" status; then
+        log_info "Internal restart completed."
+    else
+        log_error "App failed to come back after restart, check logs above."
+        exit 1
+    fi
+else
+    log_info "App is not running, new config applies on next start."
+fi
+
+log_info "Config callback finished successfully."
+exit 0

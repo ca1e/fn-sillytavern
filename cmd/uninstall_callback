@@ -1,0 +1,63 @@
+#!/bin/bash
+
+### This script is called after the user uninstalls the application.
+### wizard_keep_data decides whether user data in @appshare is kept.
+
+APP_NAME="${TRIM_APPNAME:-fn-sillytavern}"
+LOG_FILE="${TRIM_PKGVAR}/info.log"
+
+log_message() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [uninstall_callback] $1" >>"${LOG_FILE}"
+}
+
+log_error() {
+    log_message "ERROR: $1"
+    [ -n "${TRIM_TEMP_LOGFILE}" ] && echo "$1" >>"${TRIM_TEMP_LOGFILE}" 2>/dev/null
+}
+
+# Clear everything inside a data directory while keeping the directory itself
+# (the directory root is owned by fnOS). Refuses paths that do not end with
+# "/<dir-type>/<app-name>" to avoid wiping the wrong location.
+clear_app_dir() {
+    local target_dir="$1"
+    local suffix="$2"
+
+    case "${target_dir}" in
+    *"/${suffix}")
+        ;;
+    *)
+        log_error "Refusing to clear ${target_dir}: unexpected path suffix (expected */${suffix})."
+        return 1
+        ;;
+    esac
+
+    if [ ! -d "${target_dir}" ]; then
+        return 0
+    fi
+
+    find "${target_dir}" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null
+    return 0
+}
+
+case "${wizard_keep_data}" in
+keep | yes | true | 1)
+    log_message "keep_data=${wizard_keep_data}: user data in @appshare/${APP_NAME} is preserved."
+    ;;
+remove | no | false | 0)
+    log_message "keep_data=${wizard_keep_data}: clearing user data directories."
+
+    APP_SHARE="${TRIM_APPDEST_VOL}/@appshare/${APP_NAME}"
+    if ! clear_app_dir "${APP_SHARE}" "@appshare/${APP_NAME}"; then
+        log_error "Failed to clear ${APP_SHARE}."
+        exit 1
+    fi
+    log_message "Cleared ${APP_SHARE}."
+    ;;
+*)
+    log_error "Unknown wizard_keep_data value: ${wizard_keep_data}. Doing nothing."
+    exit 1
+    ;;
+esac
+
+log_message "Uninstall callback finished."
+exit 0

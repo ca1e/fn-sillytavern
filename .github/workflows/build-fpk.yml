@@ -1,0 +1,46 @@
+name: Build fn-sillytavern FPK
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      st_version:
+        description: "SillyTavern version to bundle"
+        required: false
+        default: "1.19.0"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build FPK
+        env:
+          # Keep the GitHub accelerator configurable; use it only if the
+          # runner cannot reach github.com directly.
+          GH_PROXY: ${{ vars.GH_PROXY || 'https://gh-proxy.com' }}
+        run: |
+          chmod +x build.sh
+          ./build.sh "${{ github.event.inputs.st_version || '1.19.0' }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fn-sillytavern-fpk
+          path: |
+            *.fpk
+          if-no-files-found: error
+
+      - name: Release on tag
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: "*.fpk"
+          generate_release_notes: true

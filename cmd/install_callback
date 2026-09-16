@@ -1,0 +1,145 @@
+#!/bin/bash
+
+### This script is called after the user installs (or upgrades) the application.
+### It installs SillyTavern npm dependencies and generates the persistent config.
+
+LOG_FILE="${TRIM_PKGVAR}/info.log"
+NODE_BIN="/var/apps/nodejs_v24/target/bin"
+NPM_BIN="${NODE_BIN}/npm"
+
+ST_DIR="${TRIM_APPDEST}/sillytavern"
+APP_SHARE="${TRIM_APPDEST_VOL}/@appshare/fn-sillytavern"
+APP_HOME="${APP_SHARE}/home"
+CONFIG_DIR="${APP_SHARE}/config"
+CONFIG_FILE="${CONFIG_DIR}/config.yaml"
+DATA_ROOT="${APP_SHARE}/data"
+
+DSH_PKGHOME="${TRIM_PKGHOME}"
+NPM_CACHE_DIR="${DSH_PKGHOME}/.npm-cache"
+NPM_USER_CONFIG_FILE="${DSH_PKGHOME}/.npmrc"
+DEPS_MARKER="${DSH_PKGHOME}/.deps-installed"
+
+log_message() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [install_callback] $1" >>"${LOG_FILE}"
+}
+
+log_info() {
+    log_message "INFO: $1"
+}
+
+log_error() {
+    log_message "ERROR: $1"
+}
+
+fail_install() {
+    log_error "$1"
+    [ -n "${TRIM_TEMP_LOGFILE}" ] && echo "$1" >>"${TRIM_TEMP_LOGFILE}" 2>/dev/null
+    exit 1
+}
+
+# ---------------------------------------------------------------------------
+# 1. Runtime & source checks
+# ---------------------------------------------------------------------------
+[ -x "${NPM_BIN}" ] || fail_install "npm not found at ${NPM_BIN} (install_dep_apps nodejs_v24 missing?)"
+[ -f "${ST_DIR}/server.js" ] || fail_install "SillyTavern source is missing at ${ST_DIR} (broken package?)"
+[ -f "${ST_DIR}/package.json" ] || fail_install "package.json is missing at ${ST_DIR} (broken package?)"
+
+mkdir -p "${APP_SHARE}" "${APP_HOME}" "${CONFIG_DIR}" "${DATA_ROOT}" "${NPM_CACHE_DIR}" "${DSH_PKGHOME}"
+
+export HOME="${APP_HOME}"
+export NPM_CONFIG_CACHE="${NPM_CACHE_DIR}"
+export NPM_CONFIG_USERCONFIG="${NPM_USER_CONFIG_FILE}"
+export PATH="${NODE_BIN}:${PATH}"
+
+ST_VERSION="$("${NODE_BIN}/node" -p "require('${ST_DIR}/package.json').version" 2>/dev/null || echo unknown)"
+log_info "Installing SillyTavern app (bundled SillyTavern ${ST_VERSION})."
+
+# ---------------------------------------------------------------------------
+# 2. npm registry (persisted so upgrades reuse the chosen mirror)
+# ---------------------------------------------------------------------------
+if [ -n "${wizard_npm_registry}" ]; then
+    log_info "Using npm registry from install wizard: ${wizard_npm_registry}"
+    printf 'registry=%s\n' "${wizard_npm_registry}" >"${NPM_USER_CONFIG_FILE}"
+elif [ ! -f "${NPM_USER_CONFIG_FILE}" ]; then
+    printf 'registry=https://registry.npmjs.org/\n' >"${NPM_USER_CONFIG_FILE}"
+fi
+
+# ---------------------------------------------------------------------------
+# 3. Install dependencies (skipped when already present and up to date)
+# ---------------------------------------------------------------------------
+RAN_NPM_INSTALL=0
+if [ -d "${ST_DIR}/node_modules" ] && [ -f "${DEPS_MARKER}" ] && ! [ "${ST_DIR}/package.json" -nt "${DEPS_MARKER}" ]; then
+    log_info "node_modules already present and up to date, skip npm install."
+else
+    RAN_NPM_INSTALL=1
+    log_info "Running npm install --omit=dev (this may take a few minutes)..."
+    if ! (cd "${ST_DIR}" && "${NPM_BIN}" install --omit=dev --no-audit --no-fund --loglevel=warn >>"${LOG_FILE}" 2>&1); then
+        fail_install "npm install failed. Check ${LOG_FILE}. You may retry after choosing another npm mirror."
+    fi
+    [ -d "${ST_DIR}/node_modules" ] || fail_install "npm install finished but node_modules is still missing."
+    touch "${DEPS_MARKER}"
+    log_info "npm install completed."
+fi
+
+# ---------------------------------------------------------------------------
+# 3.5 Pre-compile the frontend bundle (makes the first start fast; non-fatal).
+# Runs after dependency changes or when the webpack cache is missing.
+# ---------------------------------------------------------------------------
+if [ -f "${TRIM_APPDEST}/prebuild-frontend.mjs" ] && { [ "${RAN_NPM_INSTALL}" = "1" ] || [ ! -d "${DATA_ROOT}/_webpack" ]; }; then
+    log_info "Pre-compiling SillyTavern frontend bundle..."
+    if ST_DATA_ROOT="${DATA_ROOT}" "${NODE_BIN}/node" "${TRIM_APPDEST}/prebuild-frontend.mjs" >>"${LOG_FILE}" 2>&1; then
+        log_info "Frontend pre-compile finished."
+    else
+        log_message "WARN: frontend pre-compile failed (non-fatal, first start will compile instead)."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# 4. Generate persistent config.yaml (first install only)
+# ---------------------------------------------------------------------------
+if [ ! -f "${CONFIG_FILE}" ]; then
+    [ -f "${ST_DIR}/default/config.yaml" ] || fail_install "default/config.yaml missing in bundled source."
+
+    # Detect the NAS primary IPv4 subnet (CIDR) for the access whitelist.
+    SUBNET_CIDR=""
+    if command -v ip >/dev/null 2>&1; then
+        SUBNET_CIDR="$(ip -4 addr show scope global 2>/dev/null | awk '/inet /{print $2; exit}')"
+    fi
+    if [ -z "${SUBNET_CIDR}" ] && command -v hostname >/dev/null 2>&1; then
+        FIRST_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+        [ -n "${FIRST_IP}" ] && SUBNET_CIDR="${FIRST_IP}/24"
+    fi
+    log_info "Detected NAS subnet: ${SUBNET_CIDR:-unknown}"
+
+    WHITELIST_ENTRIES="127.0.0.1,::1"
+    [ -n "${SUBNET_CIDR}" ] && WHITELIST_ENTRIES="${WHITELIST_ENTRIES},${SUBNET_CIDR}"
+    if [ -n "${wizard_extra_whitelist}" ]; then
+        EXTRA="$(printf '%s' "${wizard_extra_whitelist}" | tr -d '[:space:]')"
+        [ -n "${EXTRA}" ] && WHITELIST_ENTRIES="${WHITELIST_ENTRIES},${EXTRA}"
+    fi
+    log_info "Whitelist entries: ${WHITELIST_ENTRIES}"
+
+    PORT="${wizard_port:-8000}"
+
+    awk -v entries="${WHITELIST_ENTRIES}" '
+        /^whitelist:/ {
+            print "whitelist:"
+            n = split(entries, arr, ",")
+            for (i = 1; i <= n; i++) print "  - " arr[i]
+            skip = 1
+            next
+        }
+        skip && /^[[:space:]]/ { next }
+        { skip = 0; print }
+    ' "${ST_DIR}/default/config.yaml" \
+    | sed -e "s/^port: .*/port: ${PORT}/" \
+          -e "s/^listen: .*/listen: true/" \
+          > "${CONFIG_FILE}" || fail_install "failed to generate ${CONFIG_FILE}"
+
+    log_info "Generated config.yaml (port: ${PORT}, listen: true, whitelistMode: true)."
+else
+    log_info "Persistent config.yaml already exists, keep user settings."
+fi
+
+log_info "Install callback finished successfully."
+exit 0

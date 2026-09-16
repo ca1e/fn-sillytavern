@@ -1,0 +1,25 @@
+#!/bin/bash
+
+### This script is called after the user upgrades the application.
+### User data lives in @appshare and survives upgrades; here we only
+### reconcile dependencies (when package.json changed) via install_callback.
+
+log_message() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [upgrade_callback] $1" >>"${TRIM_PKGVAR}/info.log"
+}
+
+INSTALL_CALLBACK="${TRIM_APPDEST}/cmd/install_callback"
+
+[ -f "${INSTALL_CALLBACK}" ] || {
+    log_message "ERROR: install_callback is unavailable; refusing a partial upgrade."
+    exit 1
+}
+
+log_message "Running install callback to reconcile bundled SillyTavern runtime and dependencies."
+wizard_npm_registry="" bash "${INSTALL_CALLBACK}" || {
+    log_message "ERROR: install callback failed during upgrade."
+    exit 1
+}
+
+log_message "Upgrade callback completed."
+exit 0

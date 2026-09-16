@@ -1,0 +1,24 @@
+[
+    {
+        "stepTitle": "数据处理",
+        "items": [
+            {
+                "type": "select",
+                "field": "wizard_keep_data",
+                "label": "卸载时的数据处理",
+                "initValue": "keep",
+                "helpText": "选择保留时，聊天记录、角色卡等用户数据将保留在共享目录 fn-sillytavern 中；选择删除时将清空该目录。",
+                "options": [
+                    {
+                        "label": "保留数据（推荐）",
+                        "value": "keep"
+                    },
+                    {
+                        "label": "删除数据",
+                        "value": "remove"
+                    }
+                ]
+            }
+        ]
+    }
+]

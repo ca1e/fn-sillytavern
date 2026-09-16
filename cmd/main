@@ -1,0 +1,175 @@
+#!/bin/bash
+
+### Start / stop / status control for the SillyTavern service.
+
+LOG_FILE="${TRIM_PKGVAR}/info.log"
+PID_FILE="${TRIM_PKGVAR}/app.pid"
+RESTART_MARK_FILE="${TRIM_PKGVAR}/internal-restart"
+
+NODE_BIN="/var/apps/nodejs_v24/target/bin"
+NODE_EXEC="${NODE_BIN}/node"
+
+ST_DIR="${TRIM_APPDEST}/sillytavern"
+APP_SHARE="${TRIM_APPDEST_VOL}/@appshare/fn-sillytavern"
+CONFIG_FILE="${APP_SHARE}/config/config.yaml"
+DATA_ROOT="${APP_SHARE}/data"
+APP_HOME="${APP_SHARE}/home"
+
+PORT="${wizard_port:-8000}"
+
+log_msg() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [main] $1" >>"${LOG_FILE}"
+}
+
+# Truncate the log if it grows beyond 10 MB.
+if [ -f "${LOG_FILE}" ]; then
+    log_size="$(stat -c%s "${LOG_FILE}" 2>/dev/null || echo 0)"
+    if [ "${log_size}" -gt 10485760 ]; then
+        : >"${LOG_FILE}"
+    fi
+fi
+
+check_process() {
+    local pid="$1"
+    if [ -d "/proc/${pid}" ]; then
+        local state
+        state="$(awk '{print $3}' "/proc/${pid}/stat" 2>/dev/null)"
+        if [ "${state}" = "Z" ] || [ "${state}" = "X" ]; then
+            return 1
+        fi
+        kill -0 "${pid}" 2>/dev/null
+        return $?
+    fi
+    return 1
+}
+
+# Live check based on the PID file only (no restart grace). Used by
+# start_process to decide whether a new process must be launched.
+is_running() {
+    if [ -f "${PID_FILE}" ]; then
+        pid="$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')"
+        if check_process "${pid}"; then
+            return 0
+        else
+            rm -f "${PID_FILE}"
+        fi
+    fi
+    return 1
+}
+
+# Service status as reported to the service manager: running when the app is
+# alive OR during the 120s internal-restart grace window, so the service
+# manager does not tear the app down mid-restart.
+status() {
+    if is_running; then
+        return 0
+    fi
+
+    if [ -f "${RESTART_MARK_FILE}" ]; then
+        mark_ts="$(head -n 1 "${RESTART_MARK_FILE}" 2>/dev/null | tr -d '[:space:]')"
+        now_ts="$(date +%s)"
+        if [ -n "${mark_ts}" ] && [ $((now_ts - mark_ts)) -lt 120 ]; then
+            return 0
+        fi
+        rm -f "${RESTART_MARK_FILE}"
+    fi
+
+    return 1
+}
+
+start_process() {
+    if is_running; then
+        log_msg "SillyTavern already running, skip start."
+        return 0
+    fi
+
+    if [ ! -x "${NODE_EXEC}" ]; then
+        log_msg "ERROR: node runtime not found at ${NODE_EXEC} (install_dep_apps nodejs_v24 missing?)"
+        return 1
+    fi
+
+    if [ ! -f "${ST_DIR}/server.js" ]; then
+        log_msg "ERROR: SillyTavern source not found at ${ST_DIR}/server.js"
+        return 1
+    fi
+
+    if [ ! -d "${ST_DIR}/node_modules" ]; then
+        log_msg "ERROR: dependencies not installed at ${ST_DIR}/node_modules (install_callback did not run?)"
+        return 1
+    fi
+
+    mkdir -p "${DATA_ROOT}" "${APP_HOME}" "${APP_SHARE}/config"
+
+    log_msg "Starting SillyTavern (port: ${PORT}) ..."
+    cd "${ST_DIR}" || return 1
+    HOME="${APP_HOME}" \
+        PATH="${NODE_BIN}:${PATH}" \
+        bash -c "exec '${NODE_EXEC}' server.js \
+            --listen \
+            --port '${PORT}' \
+            --configPath '${CONFIG_FILE}' \
+            --dataRoot '${DATA_ROOT}' \
+            --browserLaunchEnabled false" >>"${LOG_FILE}" 2>&1 &
+    printf "%s" "$!" >"${PID_FILE}"
+    log_msg "SillyTavern started with pid $!"
+    return 0
+}
+
+stop_process() {
+    if [ "${FNOS_INTERNAL_RESTART}" != "1" ]; then
+        rm -f "${RESTART_MARK_FILE}"
+    fi
+
+    log_msg "Stopping SillyTavern ..."
+
+    if [ ! -r "${PID_FILE}" ]; then
+        log_msg "no pid file, nothing to stop."
+        return 0
+    fi
+
+    pid="$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')"
+    if ! check_process "${pid}"; then
+        rm -f "${PID_FILE}"
+        log_msg "stale pid file removed."
+        return 0
+    fi
+
+    log_msg "send TERM signal to PID:${pid}..."
+    kill -TERM "${pid}" >>"${LOG_FILE}" 2>&1
+
+    local count=0
+    while check_process "${pid}" && [ ${count} -lt 10 ]; do
+        sleep 1
+        count=$((count + 1))
+        log_msg "waiting process terminate... (${count}s/10s)"
+    done
+
+    if check_process "${pid}"; then
+        log_msg "send KILL signal to PID:${pid}..."
+        kill -KILL "${pid}" >>"${LOG_FILE}" 2>&1
+        sleep 1
+    fi
+
+    rm -f "${PID_FILE}"
+    log_msg "SillyTavern stopped."
+    return 0
+}
+
+case "$1" in
+start)
+    start_process
+    ;;
+stop)
+    stop_process
+    ;;
+status)
+    if status; then
+        exit 0
+    else
+        exit 3
+    fi
+    ;;
+*)
+    exit 1
+    ;;
+esac
