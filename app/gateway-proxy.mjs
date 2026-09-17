@@ -80,6 +80,37 @@ const SHIM_SOURCE = `(function(){
     Wrapped.prototype=OE.prototype;
     window.EventSource=Wrapped;
   }
+  // Runtime-built element URLs (thumbnail helpers etc.) bypass fetch/XHR:
+  // intercept attribute writes so every src/href stays inside the gateway.
+  function fixAttr(v){
+    return (typeof v==='string'&&v.charAt(0)==='/'&&v.charAt(1)!=='/'&&v!==P&&v.indexOf(P+'/')!==0)?P+v:v;
+  }
+  if(window.Element){
+    var osa=Element.prototype.setAttribute;
+    Element.prototype.setAttribute=function(name,value){
+      try{
+        var n=String(name).toLowerCase();
+        if(n==='src'||n==='href'||n==='action'||n==='data'){ value=fixAttr(value); }
+      }catch(e){}
+      return osa.call(this,name,value);
+    };
+  }
+  [['HTMLImageElement','src'],['HTMLScriptElement','src'],['HTMLSourceElement','src'],
+   ['HTMLIFrameElement','src'],['HTMLMediaElement','src'],['HTMLInputElement','src'],
+   ['HTMLEmbedElement','src'],['HTMLTrackElement','src'],
+   ['HTMLLinkElement','href'],['HTMLAnchorElement','href'],
+   ['HTMLFormElement','action'],['HTMLObjectElement','data']
+  ].forEach(function(pair){
+    var ctor=window[pair[0]];
+    if(!ctor||!ctor.prototype) return;
+    var desc=Object.getOwnPropertyDescriptor(ctor.prototype,pair[1]);
+    if(!desc||!desc.set||!desc.get) return;
+    Object.defineProperty(ctor.prototype,pair[1],{
+      configurable:true,
+      get:function(){ return desc.get.call(this); },
+      set:function(v){ desc.set.call(this,fixAttr(v)); }
+    });
+  });
 })();`;
 
 const SHIM_SCRIPT = `<script>${SHIM_SOURCE}</script>`;
@@ -144,8 +175,17 @@ function rewriteJavaScript(body) {
 
 function forward(req, res) {
     const headers = { ...req.headers };
-    delete headers['accept-encoding']; // need plain text to rewrite HTML/CSS
+    delete headers['accept-encoding']; // need plain text to rewrite HTML/CSS/JS
     headers.host = `${UPSTREAM_HOST}:${UPSTREAM_PORT}`;
+
+    // Never let upstream answer 304: a cached body predates this proxy's
+    // rewrites, and mixed old/new modules break the app after upgrades.
+    if (req.method === 'GET') {
+        delete headers['if-none-match'];
+        delete headers['if-modified-since'];
+        delete headers['if-unmodified-since'];
+        delete headers['if-range'];
+    }
 
     const upstreamReq = http.request({
         host: UPSTREAM_HOST,
