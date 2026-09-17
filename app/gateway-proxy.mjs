@@ -121,6 +121,27 @@ function rewriteCss(body) {
         (match, quote, path) => `url(${quote}${addPrefix(path)}${quote})`);
 }
 
+// SillyTavern has root-absolute ES module specifiers (e.g.
+// `import { gzip } from '/lib.js'`). Absolute paths ignore <base href> and
+// bypass the fetch shim, so rewrite them to stay inside the gateway prefix.
+// Template literals and property assignments cover runtime-built URLs such as
+// `` import(`/scripts/extensions/${name}/index.js`) `` and
+// `splashLogo.src = '/img/logo.png'`. Guards keep non-URL strings untouched:
+// paths must start with [a-zA-Z_] and contain no spaces (slash-command help
+// texts like `/abort command executed` are templates too, but never URLs).
+function rewriteJavaScript(body) {
+    const source = body.toString('utf8');
+    return source
+        .replace(/(\bfrom\s*)(['"])(\/(?!\/)[^'"]*)\2/g,
+            (match, keyword, quote, path) => keyword + quote + addPrefix(path) + quote)
+        .replace(/(\bimport\s*\(?\s*)(['"])(\/(?!\/)[^'"]*)\2/g,
+            (match, keyword, quote, path) => keyword + quote + addPrefix(path) + quote)
+        .replace(/(`)(\/(?!\/)[a-zA-Z_][^`" ]*)`/g,
+            (match, tick, path) => tick + addPrefix(path) + '`')
+        .replace(/(\.\s*(?:src|href|action|data)\s*=\s*)(['"])(\/(?!\/)[a-zA-Z_][^'" ]*)\2/g,
+            (match, lhs, quote, path) => lhs + quote + addPrefix(path) + quote);
+}
+
 function forward(req, res) {
     const headers = { ...req.headers };
     delete headers['accept-encoding']; // need plain text to rewrite HTML/CSS
@@ -140,7 +161,9 @@ function forward(req, res) {
         }
 
         const isRewritable = req.method === 'GET'
-            && (contentType.includes('text/html') || contentType.includes('text/css'));
+            && (contentType.includes('text/html')
+                || contentType.includes('text/css')
+                || contentType.includes('javascript'));
         if (!isRewritable) {
             res.writeHead(upstreamRes.statusCode, upstreamRes.headers);
             upstreamRes.pipe(res); // streaming/SSE passthrough, never buffered
@@ -151,9 +174,17 @@ function forward(req, res) {
         upstreamRes.on('data', (chunk) => chunks.push(chunk));
         upstreamRes.on('end', () => {
             const body = Buffer.concat(chunks);
-            const text = contentType.includes('text/html') ? rewriteHtml(body) : rewriteCss(body);
+            let text;
+            if (contentType.includes('text/html')) text = rewriteHtml(body);
+            else if (contentType.includes('text/css')) text = rewriteCss(body);
+            else text = rewriteJavaScript(body);
             delete upstreamRes.headers['content-length'];
             delete upstreamRes.headers['content-encoding'];
+            // The body no longer matches the upstream validators: keep browsers
+            // from reusing cached copies rewritten by an older proxy version.
+            delete upstreamRes.headers.etag;
+            delete upstreamRes.headers['last-modified'];
+            upstreamRes.headers['cache-control'] = 'no-cache';
             res.writeHead(upstreamRes.statusCode, upstreamRes.headers);
             res.end(text);
         });
