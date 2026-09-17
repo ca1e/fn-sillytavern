@@ -4,9 +4,10 @@
             "title": "SillyTavern",
             "icon": "images/icon_{0}.png",
             "type": "iframe",
-            "protocol": "http",
-            "port": "${wizard_port}",
-            "url": "/",
+            "protocol": "",
+            "gatewayPrefix": "/app/fn-sillytavern",
+            "gatewaySocket": "app.sock",
+            "url": "/app/fn-sillytavern",
             "allUsers": false,
             "control": {
                 "accessPerm": "editable"

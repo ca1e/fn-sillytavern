@@ -1,16 +1,23 @@
 #!/bin/bash
 
-### Start / stop / status control for the SillyTavern service.
+### Start / stop / status control for the SillyTavern service and its
+### fnOS unified-gateway bridge process.
 
 LOG_FILE="${TRIM_PKGVAR}/info.log"
 PID_FILE="${TRIM_PKGVAR}/app.pid"
+GATEWAY_PID_FILE="${TRIM_PKGVAR}/gateway.pid"
 RESTART_MARK_FILE="${TRIM_PKGVAR}/internal-restart"
 
 NODE_BIN="/var/apps/nodejs_v24/target/bin"
 NODE_EXEC="${NODE_BIN}/node"
 
+APP_NAME="${TRIM_APPNAME:-fn-sillytavern}"
 ST_DIR="${TRIM_APPDEST}/sillytavern"
-APP_SHARE="${TRIM_APPDEST_VOL}/@appshare/fn-sillytavern"
+GATEWAY_SCRIPT="${TRIM_APPDEST}/gateway-proxy.mjs"
+GATEWAY_SOCKET="${TRIM_APPDEST}/app.sock"
+GATEWAY_PREFIX="/app/${APP_NAME}"
+
+APP_SHARE="${TRIM_APPDEST_VOL}/@appshare/${APP_NAME}"
 CONFIG_FILE="${APP_SHARE}/config/config.yaml"
 DATA_ROOT="${APP_SHARE}/data"
 APP_HOME="${APP_SHARE}/home"
@@ -43,16 +50,30 @@ check_process() {
     return 1
 }
 
-# Live check based on the PID file only (no restart grace). Used by
-# start_process to decide whether a new process must be launched.
+read_pid() {
+    head -n 1 "$1" 2>/dev/null | tr -d '[:space:]'
+}
+
+# Live check based on the PID files only (no restart grace). Used by
+# start_process to decide whether new processes must be launched.
 is_running() {
     if [ -f "${PID_FILE}" ]; then
-        pid="$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')"
+        pid="$(read_pid "${PID_FILE}")"
         if check_process "${pid}"; then
             return 0
-        else
-            rm -f "${PID_FILE}"
         fi
+        rm -f "${PID_FILE}"
+    fi
+    return 1
+}
+
+gateway_running() {
+    if [ -f "${GATEWAY_PID_FILE}" ]; then
+        gpid="$(read_pid "${GATEWAY_PID_FILE}")"
+        if check_process "${gpid}"; then
+            return 0
+        fi
+        rm -f "${GATEWAY_PID_FILE}"
     fi
     return 1
 }
@@ -66,7 +87,7 @@ status() {
     fi
 
     if [ -f "${RESTART_MARK_FILE}" ]; then
-        mark_ts="$(head -n 1 "${RESTART_MARK_FILE}" 2>/dev/null | tr -d '[:space:]')"
+        mark_ts="$(read_pid "${RESTART_MARK_FILE}")"
         now_ts="$(date +%s)"
         if [ -n "${mark_ts}" ] && [ $((now_ts - mark_ts)) -lt 120 ]; then
             return 0
@@ -77,12 +98,7 @@ status() {
     return 1
 }
 
-start_process() {
-    if is_running; then
-        log_msg "SillyTavern already running, skip start."
-        return 0
-    fi
-
+start_st() {
     if [ ! -x "${NODE_EXEC}" ]; then
         log_msg "ERROR: node runtime not found at ${NODE_EXEC} (install_dep_apps nodejs_v24 missing?)"
         return 1
@@ -115,43 +131,94 @@ start_process() {
     return 0
 }
 
-stop_process() {
-    if [ "${FNOS_INTERNAL_RESTART}" != "1" ]; then
-        rm -f "${RESTART_MARK_FILE}"
+start_gateway() {
+    if [ ! -f "${GATEWAY_SCRIPT}" ]; then
+        log_msg "WARN: gateway script missing at ${GATEWAY_SCRIPT}, desktop entry will not work."
+        return 1
     fi
 
-    log_msg "Stopping SillyTavern ..."
+    # Reclaim orphaned gateways whose pid file was lost; the marker matches
+    # only this app's proxy script path.
+    pkill -f "${APP_NAME}/gateway-proxy.mjs" >/dev/null 2>&1
+    sleep 0.3
+    rm -f "${GATEWAY_SOCKET}"
 
-    if [ ! -r "${PID_FILE}" ]; then
-        log_msg "no pid file, nothing to stop."
+    log_msg "Starting gateway bridge (${GATEWAY_PREFIX} -> 127.0.0.1:${PORT}) ..."
+    cd "${TRIM_APPDEST}" || return 1
+    GATEWAY_SOCKET="${GATEWAY_SOCKET}" \
+        GATEWAY_PREFIX="${GATEWAY_PREFIX}" \
+        UPSTREAM_HOST="127.0.0.1" \
+        UPSTREAM_PORT="${PORT}" \
+        PATH="${NODE_BIN}:${PATH}" \
+        bash -c "exec '${NODE_EXEC}' '${GATEWAY_SCRIPT}'" >>"${LOG_FILE}" 2>&1 &
+    printf "%s" "$!" >"${GATEWAY_PID_FILE}"
+    log_msg "Gateway bridge started with pid $!"
+    return 0
+}
+
+stop_pid_file() {
+    local pid_file="$1"
+    local label="$2"
+
+    if [ ! -r "${pid_file}" ]; then
         return 0
     fi
 
-    pid="$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')"
+    local pid
+    pid="$(read_pid "${pid_file}")"
     if ! check_process "${pid}"; then
-        rm -f "${PID_FILE}"
-        log_msg "stale pid file removed."
+        rm -f "${pid_file}"
         return 0
     fi
 
-    log_msg "send TERM signal to PID:${pid}..."
+    log_msg "send TERM signal to ${label} PID:${pid}..."
     kill -TERM "${pid}" >>"${LOG_FILE}" 2>&1
 
     local count=0
     while check_process "${pid}" && [ ${count} -lt 10 ]; do
         sleep 1
         count=$((count + 1))
-        log_msg "waiting process terminate... (${count}s/10s)"
+        log_msg "waiting ${label} terminate... (${count}s/10s)"
     done
 
     if check_process "${pid}"; then
-        log_msg "send KILL signal to PID:${pid}..."
+        log_msg "send KILL signal to ${label} PID:${pid}..."
         kill -KILL "${pid}" >>"${LOG_FILE}" 2>&1
         sleep 1
     fi
 
-    rm -f "${PID_FILE}"
-    log_msg "SillyTavern stopped."
+    rm -f "${pid_file}"
+    return 0
+}
+
+start_process() {
+    if ! is_running; then
+        start_st || return 1
+    else
+        log_msg "SillyTavern already running, skip start."
+    fi
+
+    if ! gateway_running; then
+        start_gateway || return 1
+    else
+        log_msg "Gateway bridge already running, skip start."
+    fi
+    return 0
+}
+
+stop_process() {
+    if [ "${FNOS_INTERNAL_RESTART}" != "1" ]; then
+        rm -f "${RESTART_MARK_FILE}"
+    fi
+
+    log_msg "Stopping gateway bridge and SillyTavern ..."
+
+    stop_pid_file "${GATEWAY_PID_FILE}" "gateway"
+    rm -f "${GATEWAY_SOCKET}"
+    pkill -f "${APP_NAME}/gateway-proxy.mjs" >/dev/null 2>&1
+
+    stop_pid_file "${PID_FILE}" "SillyTavern"
+    log_msg "Stopped."
     return 0
 }
 
