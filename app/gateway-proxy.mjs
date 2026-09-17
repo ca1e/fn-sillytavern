@@ -162,9 +162,18 @@ function forward(req, res) {
     upstreamReq.on('error', (err) => {
         log(`upstream error: ${err.message}`);
         if (!res.headersSent) {
-            res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
+            // Styled auto-refresh page: SillyTavern compiles its frontend on
+            // first boot, so this window self-heals instead of showing a
+            // dead error text.
+            res.writeHead(502, { 'content-type': 'text/html; charset=utf-8' });
+            res.end(`<!DOCTYPE html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="3">
+<style>body{background:#242425;color:#ccc;font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}div{text-align:center}h2{font-weight:600}p{opacity:.7}</style>
+</head><body><div><h2>SillyTavern 正在启动…</h2><p>首次启动需要编译前端，页面将自动刷新，请稍候</p></div></body></html>`);
+        } else {
+            res.end();
         }
-        res.end('SillyTavern is starting or unavailable. Please refresh in a moment.');
     });
 
     req.pipe(upstreamReq);
